@@ -187,7 +187,7 @@ class _ProfessionalDashboardScreenState
                   if (!context.mounted) return;
                   final navigator = Navigator.of(context);
                   final messenger = ScaffoldMessenger.of(context);
-                  
+
                   try {
                     await navigator.push(
                       MaterialPageRoute(
@@ -215,7 +215,7 @@ class _ProfessionalDashboardScreenState
                   if (!context.mounted) return;
                   final navigator = Navigator.of(context);
                   final messenger = ScaffoldMessenger.of(context);
-                  
+
                   try {
                     await navigator.push(
                       MaterialPageRoute(
@@ -515,7 +515,7 @@ class _ProfessionalDashboardScreenState
                           }
                         } catch (e) {
                           if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
+                            messenger.showSnackBar(
                               SnackBar(
                                 content: Text('Error: $e'),
                                 backgroundColor: Colors.red,

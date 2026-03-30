@@ -14,7 +14,7 @@ class SensorDataProvider with ChangeNotifier {
   bool _isLoading = false;
   String? _errorMessage;
   StreamSubscription? _sensorDataSubscription;
-  double _moistureThreshold = 30.0;
+  bool _lowMoistureAlertEnabled = true;
 
   // Getters
   SensorData? get sensorData => _sensorData;
@@ -24,19 +24,18 @@ class SensorDataProvider with ChangeNotifier {
 
   /// Start listening to sensor data stream
   void startListening(String userId, double moistureThreshold) {
-    _moistureThreshold = moistureThreshold;
     _sensorDataSubscription?.cancel();
 
-    _sensorDataSubscription = _firebaseService
-        .getSensorDataStream(userId)
-        .listen(
-      (data) {
+    _sensorDataSubscription =
+        _firebaseService.getSensorDataStream(userId).listen(
+      (data) async {
         _sensorData = data;
-        _checkAlerts(data);
+        await _checkAlerts(data);
         notifyListeners();
       },
       onError: (error) {
         _errorMessage = 'Error fetching sensor data: $error';
+        _notificationService.showSystemErrorNotification(_errorMessage!);
         notifyListeners();
       },
     );
@@ -67,19 +66,20 @@ class SensorDataProvider with ChangeNotifier {
   Future<bool> togglePump(String userId) async {
     try {
       final newStatus = !isPumpOn;
-      final success = await _firebaseService.updatePumpStatus(userId, newStatus);
-      
+      final success =
+          await _firebaseService.updatePumpStatus(userId, newStatus);
+
       if (success) {
         // Show notification
         await _notificationService.showPumpStatusNotification(newStatus);
-        
+
         // Update local state immediately for better UX
         if (_sensorData != null) {
           _sensorData = _sensorData!.copyWith(pumpStatus: newStatus);
           notifyListeners();
         }
       }
-      
+
       return success;
     } catch (e) {
       _errorMessage = 'Error toggling pump: $e';
@@ -101,18 +101,33 @@ class SensorDataProvider with ChangeNotifier {
   }
 
   /// Check for alerts based on sensor data
-  void _checkAlerts(SensorData data) {
-    // Low moisture alert
-    if (data.moistureLevel < _moistureThreshold) {
-      _notificationService.showLowMoistureAlert(data.moistureLevel);
-    }
+  Future<void> _checkAlerts(SensorData data) async {
+    await _notificationService.checkAndNotifyMoisture(
+      data.moistureLevel,
+      alertEnabled: _lowMoistureAlertEnabled,
+    );
 
     // System error alert (example: sensor not responding)
     if (data.status == 'error') {
-      _notificationService.showSystemError(
+      await _notificationService.showSystemErrorNotification(
         'Sensor communication error detected',
       );
     }
+  }
+
+  /// Toggle low moisture alert from settings.
+  void setLowMoistureAlertEnabled(bool value) {
+    _lowMoistureAlertEnabled = value;
+    notifyListeners();
+  }
+
+  /// Manual moisture check trigger.
+  Future<void> checkMoistureNow() async {
+    if (_sensorData == null) return;
+    await _notificationService.checkAndNotifyMoisture(
+      _sensorData!.moistureLevel,
+      alertEnabled: _lowMoistureAlertEnabled,
+    );
   }
 
   /// Simulate sensor data update (for testing without Firebase)

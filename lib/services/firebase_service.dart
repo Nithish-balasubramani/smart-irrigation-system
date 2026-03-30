@@ -122,6 +122,168 @@ class FirebaseService {
     }
   }
 
+  /// Resolve a user node key from either direct key or email field.
+  Future<String?> resolveUserId(String identifier) async {
+    final trimmed = identifier.trim();
+    if (trimmed.isEmpty) return null;
+
+    try {
+      final directSnapshot = await _database.child('users/$trimmed').get();
+      if (directSnapshot.exists) {
+        return trimmed;
+      }
+
+      final emailQuery = await _database
+          .child('users')
+          .orderByChild('email')
+          .equalTo(trimmed)
+          .limitToFirst(1)
+          .get();
+
+      if (emailQuery.exists && emailQuery.value is Map) {
+        final map = Map<dynamic, dynamic>.from(emailQuery.value as Map);
+        if (map.isNotEmpty) {
+          return map.keys.first.toString();
+        }
+      }
+
+      final usersSnapshot = await _database.child('users').get();
+      if (usersSnapshot.exists && usersSnapshot.value is Map) {
+        final usersMap = Map<dynamic, dynamic>.from(usersSnapshot.value as Map);
+        final target = trimmed.toLowerCase();
+
+        for (final entry in usersMap.entries) {
+          final uid = entry.key.toString();
+          final node = entry.value;
+          if (node is! Map) continue;
+
+          final userNode = Map<dynamic, dynamic>.from(node);
+          final profileNode = userNode['profile'] is Map
+              ? Map<dynamic, dynamic>.from(userNode['profile'] as Map)
+              : <dynamic, dynamic>{};
+
+          final candidates = <String>{
+            uid,
+            userNode['id']?.toString() ?? '',
+            userNode['uid']?.toString() ?? '',
+            userNode['userId']?.toString() ?? '',
+            userNode['email']?.toString() ?? '',
+            userNode['username']?.toString() ?? '',
+            userNode['userName']?.toString() ?? '',
+            profileNode['id']?.toString() ?? '',
+            profileNode['uid']?.toString() ?? '',
+            profileNode['email']?.toString() ?? '',
+            profileNode['username']?.toString() ?? '',
+            profileNode['userName']?.toString() ?? '',
+          };
+
+          final matched = candidates
+              .where((value) => value.trim().isNotEmpty)
+              .map((value) => value.trim().toLowerCase())
+              .any((value) => value == target);
+
+          if (matched) {
+            return uid;
+          }
+        }
+      }
+
+      return null;
+    } catch (e) {
+      print('Error resolving user id: $e');
+      return null;
+    }
+  }
+
+  /// Get user profile data (tries both nested profile and root user node).
+  Future<Map<String, dynamic>?> getUserProfile(String userId) async {
+    try {
+      final profileSnapshot =
+          await _database.child('users/$userId/profile').get();
+      if (profileSnapshot.exists && profileSnapshot.value is Map) {
+        final profile = Map<String, dynamic>.from(profileSnapshot.value as Map);
+        return {
+          ...profile,
+          'name': _firstNonEmptyString([
+            profile['name'],
+            profile['fullName'],
+            profile['farmerName'],
+            profile['username'],
+            profile['userName'],
+          ]),
+          'farm': _firstNonEmptyString([
+            profile['farm'],
+            profile['farmName'],
+            profile['location'],
+            profile['address'],
+          ]),
+        };
+      }
+
+      final userSnapshot = await _database.child('users/$userId').get();
+      if (userSnapshot.exists && userSnapshot.value is Map) {
+        final userMap = Map<String, dynamic>.from(userSnapshot.value as Map);
+
+        if (userMap['profile'] is Map) {
+          final profile = Map<String, dynamic>.from(userMap['profile'] as Map);
+          return {
+            ...profile,
+            'name': _firstNonEmptyString([
+              profile['name'],
+              profile['fullName'],
+              profile['farmerName'],
+              profile['username'],
+              profile['userName'],
+              userMap['name'],
+              userMap['fullName'],
+              userMap['farmerName'],
+            ]),
+            'farm': _firstNonEmptyString([
+              profile['farm'],
+              profile['farmName'],
+              profile['location'],
+              profile['address'],
+              userMap['farm'],
+              userMap['farmName'],
+              userMap['location'],
+            ]),
+          };
+        }
+
+        return {
+          ...userMap,
+          'name': _firstNonEmptyString([
+            userMap['name'],
+            userMap['fullName'],
+            userMap['farmerName'],
+            userMap['username'],
+            userMap['userName'],
+          ]),
+          'farm': _firstNonEmptyString([
+            userMap['farm'],
+            userMap['farmName'],
+            userMap['location'],
+            userMap['address'],
+          ]),
+        };
+      }
+
+      return null;
+    } catch (e) {
+      print('Error fetching user profile: $e');
+      return null;
+    }
+  }
+
+  String _firstNonEmptyString(List<dynamic> values) {
+    for (final value in values) {
+      if (value is String && value.trim().isNotEmpty) {
+        return value.trim();
+      }
+    }
+    return '';
+  }
+
   /// Default sensor data for testing or when no data exists
   SensorData _getDefaultSensorData() {
     return SensorData(

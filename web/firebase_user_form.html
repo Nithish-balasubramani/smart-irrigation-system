@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Firebase User Register</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Segoe UI, sans-serif;
+      background: #f2f6f8;
+      color: #17342b;
+    }
+
+    .container {
+      max-width: 420px;
+      margin: 40px auto;
+      background: #ffffff;
+      border-radius: 14px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.08);
+      padding: 24px;
+    }
+
+    h2 {
+      margin: 0 0 18px;
+      font-size: 24px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 11px 12px;
+      border-radius: 10px;
+      border: 1px solid #c7d7cf;
+      margin-bottom: 14px;
+      font-size: 14px;
+    }
+
+    button {
+      width: 100%;
+      border: 0;
+      border-radius: 10px;
+      background: #1f8f67;
+      color: #fff;
+      padding: 12px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.7;
+      cursor: not-allowed;
+    }
+
+    #msg {
+      margin-top: 14px;
+      font-size: 14px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Register User</h2>
+
+    <label for="name">Name</label>
+    <input type="text" id="name" placeholder="Name" />
+
+    <label for="email">Email</label>
+    <input type="email" id="email" placeholder="Email" />
+
+    <label for="phone">Phone</label>
+    <input type="text" id="phone" placeholder="Phone" />
+
+    <label for="password">Password</label>
+    <input type="password" id="password" placeholder="Password" />
+
+    <button id="registerBtn" onclick="registerUser()">Register</button>
+    <p id="msg"></p>
+  </div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+    import {
+      getAuth,
+      createUserWithEmailAndPassword,
+      updateProfile
+    } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+    import {
+      getFirestore,
+      doc,
+      setDoc,
+      serverTimestamp
+    } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+    // Project values aligned with your Flutter project.
+    const firebaseConfig = {
+      apiKey: "AIzaSyCdaFKTGOtoQ0qhLAa7hmV0FyCfJAvMsIE",
+      authDomain: "smart-irrigation-system-dc891.firebaseapp.com",
+      projectId: "smart-irrigation-system-dc891",
+      storageBucket: "smart-irrigation-system-dc891.firebasestorage.app",
+      messagingSenderId: "700222279843",
+      appId: "1:700222279843:web:replace_with_web_app_id"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    function setMessage(text, isError = false) {
+      const msg = document.getElementById("msg");
+      msg.textContent = text;
+      msg.style.color = isError ? "#b42318" : "#176448";
+    }
+
+    window.registerUser = async function registerUser() {
+      const registerBtn = document.getElementById("registerBtn");
+      const name = document.getElementById("name").value.trim();
+      const email = document.getElementById("email").value.trim();
+      const phone = document.getElementById("phone").value.trim();
+      const password = document.getElementById("password").value;
+
+      if (!name || !email || !phone || !password) {
+        setMessage("Please fill all fields.", true);
+        return;
+      }
+
+      if (password.length < 6) {
+        setMessage("Password must be at least 6 characters.", true);
+        return;
+      }
+
+      try {
+        registerBtn.disabled = true;
+        setMessage("Creating user...");
+
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        const { user } = userCredential;
+        const uid = user.uid;
+
+        await updateProfile(user, { displayName: name });
+
+        await setDoc(doc(db, "users", uid), {
+          uid,
+          name,
+          email,
+          phone,
+          role: "user",
+          irrigation_data: {
+            soil_moisture: 0,
+            temperature: 0,
+            humidity: 0,
+            motor_status: "OFF"
+          },
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+
+        setMessage("User registered and saved to Firestore successfully.");
+      } catch (error) {
+        setMessage(error.message || "Registration failed.", true);
+      } finally {
+        registerBtn.disabled = false;
+      }
+    };
+  </script>
+</body>
+</html>

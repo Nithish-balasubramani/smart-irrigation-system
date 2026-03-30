@@ -1,10 +1,12 @@
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/user_model.dart';
 
 /// Authentication Service using Firebase Auth
 /// Handles user login, signup, and authentication state
 class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
   /// Get current user
   User? get currentUser => _auth.currentUser;
@@ -20,13 +22,22 @@ class AuthService {
   }) async {
     try {
       // Create user
-      final UserCredential credential = await _auth.createUserWithEmailAndPassword(
+      final UserCredential credential =
+          await _auth.createUserWithEmailAndPassword(
         email: email,
         password: password,
       );
 
       // Update display name
       await credential.user?.updateDisplayName(name);
+
+      if (credential.user != null) {
+        await _upsertUserInFirestore(
+          credential.user!,
+          fallbackName: name,
+          isNewUser: true,
+        );
+      }
 
       if (credential.user != null) {
         return UserModel(
@@ -54,6 +65,10 @@ class AuthService {
         email: email,
         password: password,
       );
+
+      if (credential.user != null) {
+        await _upsertUserInFirestore(credential.user!);
+      }
 
       if (credential.user != null) {
         return UserModel(
@@ -126,5 +141,33 @@ class AuthService {
       );
     }
     return null;
+  }
+
+  /// Create or update user profile in Firestore under users/{uid}
+  Future<void> _upsertUserInFirestore(
+    User user, {
+    String? fallbackName,
+    bool isNewUser = false,
+  }) async {
+    try {
+      final userRef = _firestore.collection('users').doc(user.uid);
+
+      final payload = <String, dynamic>{
+        'uid': user.uid,
+        'email': user.email ?? '',
+        'name': (user.displayName ?? fallbackName ?? 'User').trim(),
+        'phoneNumber': user.phoneNumber,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+
+      if (isNewUser) {
+        payload['createdAt'] = FieldValue.serverTimestamp();
+      }
+
+      await userRef.set(payload, SetOptions(merge: true));
+    } catch (e) {
+      // Do not block authentication flow if profile sync fails.
+      print('Firestore user sync failed: $e');
+    }
   }
 }

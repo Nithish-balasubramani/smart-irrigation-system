@@ -1,12 +1,19 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'firebase_options.dart';
+import 'screens/irrigation_screen.dart';
+import 'screens/profile_edit_screen.dart';
+import 'screens/zones_screen.dart';
+import 'services/auth_service.dart';
 import 'services/firebase_service.dart';
+import 'services/notification_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -15,6 +22,15 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+
+  await NotificationService().initialize();
+  NotificationService().startIrrigationStatusListener();
+
+  if (kDebugMode) {
+    Future<void>.delayed(const Duration(seconds: 3), () {
+      NotificationService().showIrrigationAlert();
+    });
+  }
 
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
@@ -266,6 +282,9 @@ class AgriSmartApp extends StatelessWidget {
           surface: AppColors.surface,
         ),
       ),
+      routes: {
+        '/irrigation': (context) => const IrrigationScreen(),
+      },
       home: const SplashScreen(),
     );
   }
@@ -297,18 +316,33 @@ class _SplashScreenState extends State<SplashScreen> {
     final prefs = await SharedPreferences.getInstance();
     final isLoggedIn = prefs.getBool('isLoggedIn') ?? false;
     final savedLanguage = prefs.getString('language') ?? 'en';
+    final savedUserIdentifier = prefs.getString('activeUserIdentifier') ?? '';
+    final firebaseUser = AuthService().currentUser;
+    final effectiveIdentifier = savedUserIdentifier.isNotEmpty
+        ? savedUserIdentifier
+        : (firebaseUser?.uid ?? '');
 
     if (!mounted) return;
 
-    if (isLoggedIn) {
+    if (isLoggedIn && firebaseUser != null) {
       // User is logged in, go to home
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
-          builder: (context) => HomeScreen(language: savedLanguage),
+          builder: (context) => HomeScreen(
+            language: savedLanguage,
+            userIdentifier: effectiveIdentifier,
+          ),
         ),
       );
     } else {
+      if (isLoggedIn) {
+        await prefs.setBool('isLoggedIn', false);
+        await prefs.remove('activeUserIdentifier');
+      }
+
+      if (!mounted) return;
+
       // User not logged in, go to login
       Navigator.pushReplacement(
         context,
@@ -360,7 +394,7 @@ class _SplashScreenState extends State<SplashScreen> {
                 borderRadius: BorderRadius.circular(30),
                 boxShadow: [
                   BoxShadow(
-                    color: AppColors.primary.withOpacity(0.5),
+                    color: AppColors.primary.withValues(alpha: 0.5),
                     blurRadius: 40,
                     spreadRadius: 10,
                   ),
@@ -416,6 +450,8 @@ class _LoginScreenState extends State<LoginScreen>
   late AnimationController _animController;
   late Animation<double> _fadeAnimation;
   String _language = 'en';
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
 
   @override
   void initState() {
@@ -433,6 +469,8 @@ class _LoginScreenState extends State<LoginScreen>
 
   @override
   void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
     _animController.dispose();
     super.dispose();
   }
@@ -478,7 +516,7 @@ class _LoginScreenState extends State<LoginScreen>
                             gradient: AppColors.gradient1,
                             boxShadow: [
                               BoxShadow(
-                                color: AppColors.primary.withOpacity(0.4),
+                                color: AppColors.primary.withValues(alpha: 0.4),
                                 blurRadius: 30,
                                 spreadRadius: 5,
                               ),
@@ -538,12 +576,12 @@ class _LoginScreenState extends State<LoginScreen>
                       borderRadius: BorderRadius.circular(28),
                       gradient: AppColors.gradientGlass,
                       border: Border.all(
-                        color: AppColors.cardGlass.withOpacity(0.2),
+                        color: AppColors.cardGlass.withValues(alpha: 0.2),
                         width: 1.5,
                       ),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.3),
+                          color: Colors.black.withValues(alpha: 0.3),
                           blurRadius: 20,
                           offset: const Offset(0, 10),
                         ),
@@ -556,7 +594,7 @@ class _LoginScreenState extends State<LoginScreen>
                         child: Container(
                           padding: const EdgeInsets.all(28),
                           decoration: BoxDecoration(
-                            color: AppColors.card.withOpacity(0.7),
+                            color: AppColors.card.withValues(alpha: 0.7),
                             borderRadius: BorderRadius.circular(28),
                           ),
                           child: Column(
@@ -587,6 +625,8 @@ class _LoginScreenState extends State<LoginScreen>
                               _buildTextField(
                                 icon: '✉️',
                                 hint: t['email']!,
+                                controller: _emailController,
+                                keyboardType: TextInputType.emailAddress,
                               ),
 
                               const SizedBox(height: 16),
@@ -596,6 +636,7 @@ class _LoginScreenState extends State<LoginScreen>
                                 icon: '🔒',
                                 hint: t['password']!,
                                 obscure: true,
+                                controller: _passwordController,
                               ),
 
                               const SizedBox(height: 16),
@@ -618,20 +659,62 @@ class _LoginScreenState extends State<LoginScreen>
                               // Sign In Button
                               GestureDetector(
                                 onTap: () async {
+                                  final email = _emailController.text.trim();
+                                  final password = _passwordController.text;
+
+                                  if (email.isEmpty || password.isEmpty) {
+                                    if (!context.mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                          'Enter email and password to sign in',
+                                        ),
+                                      ),
+                                    );
+                                    return;
+                                  }
+
+                                  final authService = AuthService();
+                                  String userIdentifier = email;
+
+                                  try {
+                                    final user = await authService.signIn(
+                                      email: email,
+                                      password: password,
+                                    );
+
+                                    if (user == null) {
+                                      throw 'Sign in failed. Please try again.';
+                                    }
+
+                                    userIdentifier = user.id;
+                                  } catch (e) {
+                                    if (!context.mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(content: Text(e.toString())),
+                                    );
+                                    return;
+                                  }
+
                                   // Save login state
                                   final prefs =
                                       await SharedPreferences.getInstance();
                                   await prefs.setBool('isLoggedIn', true);
                                   await prefs.setString('language', _language);
+                                  await prefs.setString(
+                                    'activeUserIdentifier',
+                                    userIdentifier,
+                                  );
 
-                                  if (!mounted) return;
                                   if (!context.mounted) return;
 
                                   Navigator.pushReplacement(
                                     context,
                                     PageRouteBuilder(
-                                      pageBuilder: (_, __, ___) =>
-                                          HomeScreen(language: _language),
+                                      pageBuilder: (_, __, ___) => HomeScreen(
+                                        language: _language,
+                                        userIdentifier: userIdentifier,
+                                      ),
                                       transitionsBuilder: (_, anim, __, child) {
                                         return FadeTransition(
                                           opacity: anim,
@@ -650,8 +733,8 @@ class _LoginScreenState extends State<LoginScreen>
                                     borderRadius: BorderRadius.circular(16),
                                     boxShadow: [
                                       BoxShadow(
-                                        color:
-                                            AppColors.primary.withOpacity(0.4),
+                                        color: AppColors.primary
+                                            .withValues(alpha: 0.4),
                                         blurRadius: 20,
                                         offset: const Offset(0, 8),
                                       ),
@@ -684,8 +767,8 @@ class _LoginScreenState extends State<LoginScreen>
                                   Expanded(
                                     child: Container(
                                       height: 1,
-                                      color:
-                                          AppColors.textMuted.withOpacity(0.2),
+                                      color: AppColors.textMuted
+                                          .withValues(alpha: 0.2),
                                     ),
                                   ),
                                   Padding(
@@ -702,8 +785,8 @@ class _LoginScreenState extends State<LoginScreen>
                                   Expanded(
                                     child: Container(
                                       height: 1,
-                                      color:
-                                          AppColors.textMuted.withOpacity(0.2),
+                                      color: AppColors.textMuted
+                                          .withValues(alpha: 0.2),
                                     ),
                                   ),
                                 ],
@@ -720,7 +803,8 @@ class _LoginScreenState extends State<LoginScreen>
                                   color: AppColors.surface,
                                   borderRadius: BorderRadius.circular(16),
                                   border: Border.all(
-                                    color: AppColors.cardGlass.withOpacity(0.2),
+                                    color: AppColors.cardGlass
+                                        .withValues(alpha: 0.2),
                                     width: 1.5,
                                   ),
                                 ),
@@ -779,13 +863,13 @@ class _LoginScreenState extends State<LoginScreen>
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
         decoration: BoxDecoration(
           color: isSelected
-              ? AppColors.primary.withOpacity(0.15)
+              ? AppColors.primary.withValues(alpha: 0.15)
               : AppColors.surface,
           borderRadius: BorderRadius.circular(25),
           border: Border.all(
             color: isSelected
                 ? AppColors.primary
-                : AppColors.cardGlass.withOpacity(0.2),
+                : AppColors.cardGlass.withValues(alpha: 0.2),
             width: 1.5,
           ),
         ),
@@ -805,13 +889,15 @@ class _LoginScreenState extends State<LoginScreen>
     required String icon,
     required String hint,
     bool obscure = false,
+    TextEditingController? controller,
+    TextInputType? keyboardType,
   }) {
     return Container(
       decoration: BoxDecoration(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color: AppColors.cardGlass.withOpacity(0.2),
+          color: AppColors.cardGlass.withValues(alpha: 0.2),
           width: 1.5,
         ),
       ),
@@ -823,6 +909,8 @@ class _LoginScreenState extends State<LoginScreen>
           ),
           Expanded(
             child: TextField(
+              controller: controller,
+              keyboardType: keyboardType,
               obscureText: obscure,
               style: const TextStyle(
                 color: AppColors.text,
@@ -861,8 +949,13 @@ class _LoginScreenState extends State<LoginScreen>
 // ═══════════════════════════════════════════════════════════
 class HomeScreen extends StatefulWidget {
   final String language;
+  final String userIdentifier;
 
-  const HomeScreen({super.key, required this.language});
+  const HomeScreen({
+    super.key,
+    required this.language,
+    this.userIdentifier = '',
+  });
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -870,11 +963,21 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
+  final FirebaseService _firebaseService = FirebaseService();
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
+  static const bool _useFirestoreDemo = true;
+
   int _currentIndex = 0;
   bool _pumpOn = false;
-  late Timer _sensorTimer;
+  Timer? _sensorTimer;
+  Timer? _autoUpdateTimer;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _realtimeSub;
   late AnimationController _pulseController;
   late String _currentLanguage;
+  String _currentFarmerName = 'Farmer';
+  String _currentFarmName = 'My Farm';
+  String _activeUserIdentifier = '';
+  String? _resolvedUserId;
 
   // Sensor data
   double _moisture = 34.0;
@@ -910,28 +1013,170 @@ class _HomeScreenState extends State<HomeScreen>
   void initState() {
     super.initState();
     _currentLanguage = widget.language;
+    _activeUserIdentifier = widget.userIdentifier.trim();
     _pulseController = AnimationController(
       duration: const Duration(milliseconds: 2000),
       vsync: this,
     )..repeat();
 
-    _sensorTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      setState(() {
-        _moisture = (_moisture + (math.Random().nextDouble() - 0.5) * 2.5)
-            .clamp(20, 90);
-        _temperature = (_temperature + (math.Random().nextDouble() - 0.5) * 0.6)
-            .clamp(18, 42);
-        _humidity = (_humidity + (math.Random().nextDouble() - 0.5) * 1.5)
-            .clamp(30, 95);
-        _rainChance = (_rainChance + (math.Random().nextDouble() - 0.5) * 4)
-            .clamp(0, 100);
+    if (_useFirestoreDemo) {
+      _startAutoUpdate();
+      _listenToRealtimeFirestore();
+    } else {
+      _loadUserContext();
+      _sensorTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
+        _refreshSensorData();
       });
+    }
+  }
+
+  void _startAutoUpdate() {
+    _autoUpdateTimer =
+        Timer.periodic(const Duration(seconds: 5), (timer) async {
+      final moisture = math.Random().nextInt(100);
+      final temperature = math.Random().nextInt(40);
+      final humidity = 35 + math.Random().nextInt(61);
+      final rainChance = math.Random().nextInt(101);
+      final motor = _pumpOn ? 'ON' : 'OFF';
+
+      try {
+        await _db.collection('irrigation_data').doc('sensor1').set({
+          'moisture': moisture,
+          'temperature': temperature,
+          'humidity': humidity,
+          'rainChance': rainChance,
+          'motor': motor,
+          'time': DateTime.now(),
+        }, SetOptions(merge: true));
+      } catch (_) {
+        // Ignore transient write failures in demo mode.
+      }
     });
+  }
+
+  void _listenToRealtimeFirestore() {
+    _realtimeSub =
+        _db.collection('irrigation_data').doc('sensor1').snapshots().listen(
+      (snapshot) {
+        final data = snapshot.data();
+        if (data == null || !mounted) return;
+
+        setState(() {
+          _moisture = _toDouble(data['moisture'], _moisture);
+          _temperature = _toDouble(data['temperature'], _temperature);
+          _humidity = _toDouble(data['humidity'], _humidity);
+          _rainChance = _toDouble(data['rainChance'], _rainChance);
+          _pumpOn = (data['motor']?.toString().toUpperCase() ?? 'OFF') == 'ON';
+        });
+      },
+    );
+  }
+
+  double _toDouble(dynamic value, double fallback) {
+    if (value is num) return value.toDouble();
+    return fallback;
+  }
+
+  Future<void> _loadUserContext() async {
+    final prefs = await SharedPreferences.getInstance();
+    final storedIdentifier =
+        prefs.getString('activeUserIdentifier')?.trim() ?? '';
+
+    if (storedIdentifier.isNotEmpty) {
+      _activeUserIdentifier = storedIdentifier;
+      _currentFarmerName = storedIdentifier;
+    }
+
+    await _refreshSensorData(forceResolveUser: true);
+  }
+
+  Future<void> _refreshSensorData({bool forceResolveUser = false}) async {
+    String? userId = _resolvedUserId;
+
+    if (forceResolveUser || userId == null) {
+      if (_activeUserIdentifier.isNotEmpty) {
+        userId = await _firebaseService.resolveUserId(_activeUserIdentifier);
+      }
+      _resolvedUserId = userId;
+    }
+
+    if (userId == null) {
+      _simulateSensorData();
+      return;
+    }
+
+    final userProfile = await _firebaseService.getUserProfile(userId);
+    final sensorData = await _firebaseService.getSensorData(userId);
+
+    if (!mounted) return;
+
+    setState(() {
+      _moisture = sensorData.moistureLevel;
+      _temperature = sensorData.temperature;
+      _humidity = sensorData.humidity;
+      _pumpOn = sensorData.pumpStatus;
+
+      final profileName = userProfile?['name'];
+      final profileFarm = userProfile?['farm'];
+      if (profileName is String && profileName.trim().isNotEmpty) {
+        _currentFarmerName = profileName.trim();
+      } else if (_activeUserIdentifier.isNotEmpty) {
+        _currentFarmerName = _activeUserIdentifier;
+      }
+      if (profileFarm is String && profileFarm.trim().isNotEmpty) {
+        _currentFarmName = profileFarm.trim();
+      }
+    });
+  }
+
+  void _simulateSensorData() {
+    if (!mounted) return;
+
+    setState(() {
+      _moisture =
+          (_moisture + (math.Random().nextDouble() - 0.5) * 2.5).clamp(20, 90);
+      _temperature = (_temperature + (math.Random().nextDouble() - 0.5) * 0.6)
+          .clamp(18, 42);
+      _humidity =
+          (_humidity + (math.Random().nextDouble() - 0.5) * 1.5).clamp(30, 95);
+      _rainChance =
+          (_rainChance + (math.Random().nextDouble() - 0.5) * 4).clamp(0, 100);
+    });
+  }
+
+  Future<void> _togglePump() async {
+    final nextState = !_pumpOn;
+
+    if (_useFirestoreDemo) {
+      try {
+        await _db.collection('irrigation_data').doc('sensor1').set({
+          'motor': nextState ? 'ON' : 'OFF',
+          'time': DateTime.now(),
+        }, SetOptions(merge: true));
+      } catch (_) {
+        return;
+      }
+
+      if (!mounted) return;
+      setState(() => _pumpOn = nextState);
+      return;
+    }
+
+    if (_resolvedUserId != null) {
+      final updated =
+          await _firebaseService.updatePumpStatus(_resolvedUserId!, nextState);
+      if (!updated) return;
+    }
+
+    if (!mounted) return;
+    setState(() => _pumpOn = nextState);
   }
 
   @override
   void dispose() {
-    _sensorTimer.cancel();
+    _sensorTimer?.cancel();
+    _autoUpdateTimer?.cancel();
+    _realtimeSub?.cancel();
     _pulseController.dispose();
     super.dispose();
   }
@@ -971,15 +1216,15 @@ class _HomeScreenState extends State<HomeScreen>
       margin: const EdgeInsets.all(16),
       padding: const EdgeInsets.symmetric(vertical: 12),
       decoration: BoxDecoration(
-        color: AppColors.card.withOpacity(0.9),
+        color: AppColors.card.withValues(alpha: 0.9),
         borderRadius: BorderRadius.circular(30),
         border: Border.all(
-          color: AppColors.cardGlass.withOpacity(0.2),
+          color: AppColors.cardGlass.withValues(alpha: 0.2),
           width: 1,
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.3),
+            color: Colors.black.withValues(alpha: 0.3),
             blurRadius: 20,
             offset: const Offset(0, 10),
           ),
@@ -1011,7 +1256,7 @@ class _HomeScreenState extends State<HomeScreen>
         ),
         decoration: BoxDecoration(
           color: isSelected
-              ? AppColors.primary.withOpacity(0.15)
+              ? AppColors.primary.withValues(alpha: 0.15)
               : Colors.transparent,
           borderRadius: BorderRadius.circular(20),
         ),
@@ -1083,7 +1328,7 @@ class _HomeScreenState extends State<HomeScreen>
         ),
         borderRadius: BorderRadius.circular(24),
         border: Border.all(
-          color: AppColors.cardGlass.withOpacity(0.2),
+          color: AppColors.cardGlass.withValues(alpha: 0.2),
         ),
       ),
       child: Row(
@@ -1102,7 +1347,7 @@ class _HomeScreenState extends State<HomeScreen>
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  t['farmerName']!,
+                  _currentFarmerName,
                   style: const TextStyle(
                     fontSize: 22,
                     fontWeight: FontWeight.w800,
@@ -1112,7 +1357,7 @@ class _HomeScreenState extends State<HomeScreen>
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  '📍 ${t['farm']}',
+                  '📍 $_currentFarmName',
                   style: const TextStyle(
                     fontSize: 11,
                     color: AppColors.textMuted,
@@ -1123,10 +1368,10 @@ class _HomeScreenState extends State<HomeScreen>
                   padding:
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
-                    color: AppColors.primary.withOpacity(0.15),
+                    color: AppColors.primary.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(20),
                     border: Border.all(
-                      color: AppColors.primary.withOpacity(0.3),
+                      color: AppColors.primary.withValues(alpha: 0.3),
                     ),
                   ),
                   child: Row(
@@ -1143,8 +1388,8 @@ class _HomeScreenState extends State<HomeScreen>
                               shape: BoxShape.circle,
                               boxShadow: [
                                 BoxShadow(
-                                  color: AppColors.primary
-                                      .withOpacity(_pulseController.value),
+                                  color: AppColors.primary.withValues(
+                                      alpha: _pulseController.value),
                                   blurRadius: 8,
                                   spreadRadius: 4,
                                 ),
@@ -1177,7 +1422,7 @@ class _HomeScreenState extends State<HomeScreen>
               shape: BoxShape.circle,
               boxShadow: [
                 BoxShadow(
-                  color: AppColors.primary.withOpacity(0.3),
+                  color: AppColors.primary.withValues(alpha: 0.3),
                   blurRadius: 15,
                   spreadRadius: 2,
                 ),
@@ -1253,7 +1498,7 @@ class _HomeScreenState extends State<HomeScreen>
                     width: 44,
                     height: 44,
                     decoration: BoxDecoration(
-                      color: (sensor['color'] as Color).withOpacity(0.15),
+                      color: (sensor['color'] as Color).withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(14),
                     ),
                     child: Center(
@@ -1268,7 +1513,7 @@ class _HomeScreenState extends State<HomeScreen>
                     padding:
                         const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     decoration: BoxDecoration(
-                      color: (sensor['color'] as Color).withOpacity(0.15),
+                      color: (sensor['color'] as Color).withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Text(
@@ -1343,8 +1588,8 @@ class _HomeScreenState extends State<HomeScreen>
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: _pumpOn
-                      ? AppColors.primary.withOpacity(0.2)
-                      : AppColors.red.withOpacity(0.1),
+                      ? AppColors.primary.withValues(alpha: 0.2)
+                      : AppColors.red.withValues(alpha: 0.1),
                   border: Border.all(
                     color: _pumpOn ? AppColors.primary : AppColors.red,
                     width: 2,
@@ -1352,8 +1597,8 @@ class _HomeScreenState extends State<HomeScreen>
                   boxShadow: _pumpOn
                       ? [
                           BoxShadow(
-                            color: AppColors.primary
-                                .withOpacity(0.3 * _pulseController.value),
+                            color: AppColors.primary.withValues(
+                                alpha: 0.3 * _pulseController.value),
                             blurRadius: 20,
                             spreadRadius: 10,
                           ),
@@ -1405,22 +1650,22 @@ class _HomeScreenState extends State<HomeScreen>
             ),
           ),
           GestureDetector(
-            onTap: () => setState(() => _pumpOn = !_pumpOn),
+            onTap: _togglePump,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
               decoration: BoxDecoration(
                 gradient: _pumpOn ? null : AppColors.gradient1,
-                color: _pumpOn ? AppColors.red.withOpacity(0.15) : null,
+                color: _pumpOn ? AppColors.red.withValues(alpha: 0.15) : null,
                 borderRadius: BorderRadius.circular(16),
                 border: _pumpOn
                     ? Border.all(
-                        color: AppColors.red.withOpacity(0.4),
+                        color: AppColors.red.withValues(alpha: 0.4),
                       )
                     : null,
                 boxShadow: !_pumpOn
                     ? [
                         BoxShadow(
-                          color: AppColors.primary.withOpacity(0.3),
+                          color: AppColors.primary.withValues(alpha: 0.3),
                           blurRadius: 15,
                           offset: const Offset(0, 6),
                         ),
@@ -1452,13 +1697,13 @@ class _HomeScreenState extends State<HomeScreen>
       decoration: BoxDecoration(
         gradient: LinearGradient(
           colors: [
-            AppColors.primary.withOpacity(0.1),
-            AppColors.primaryDark.withOpacity(0.05),
+            AppColors.primary.withValues(alpha: 0.1),
+            AppColors.primaryDark.withValues(alpha: 0.05),
           ],
         ),
         borderRadius: BorderRadius.circular(24),
         border: Border.all(
-          color: AppColors.primary.withOpacity(0.3),
+          color: AppColors.primary.withValues(alpha: 0.3),
         ),
       ),
       child: Column(
@@ -1472,13 +1717,13 @@ class _HomeScreenState extends State<HomeScreen>
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
                     colors: [
-                      AppColors.primary.withOpacity(0.3),
-                      AppColors.accent.withOpacity(0.1),
+                      AppColors.primary.withValues(alpha: 0.3),
+                      AppColors.accent.withValues(alpha: 0.1),
                     ],
                   ),
                   borderRadius: BorderRadius.circular(14),
                   border: Border.all(
-                    color: AppColors.primary.withOpacity(0.4),
+                    color: AppColors.primary.withValues(alpha: 0.4),
                   ),
                 ),
                 child: const Center(
@@ -1536,10 +1781,10 @@ class _HomeScreenState extends State<HomeScreen>
           Container(
             padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
-              color: AppColors.primary.withOpacity(0.08),
+              color: AppColors.primary.withValues(alpha: 0.08),
               borderRadius: BorderRadius.circular(16),
               border: Border.all(
-                color: AppColors.primary.withOpacity(0.2),
+                color: AppColors.primary.withValues(alpha: 0.2),
               ),
             ),
             child: Row(
@@ -1579,7 +1824,7 @@ class _HomeScreenState extends State<HomeScreen>
                       borderRadius: BorderRadius.circular(14),
                       boxShadow: [
                         BoxShadow(
-                          color: AppColors.primary.withOpacity(0.3),
+                          color: AppColors.primary.withValues(alpha: 0.3),
                           blurRadius: 12,
                           offset: const Offset(0, 4),
                         ),
@@ -1629,7 +1874,7 @@ class _HomeScreenState extends State<HomeScreen>
                       color: AppColors.surface,
                       borderRadius: BorderRadius.circular(14),
                       border: Border.all(
-                        color: AppColors.cardGlass.withOpacity(0.2),
+                        color: AppColors.cardGlass.withValues(alpha: 0.2),
                       ),
                     ),
                     child: Material(
@@ -1728,10 +1973,10 @@ class _HomeScreenState extends State<HomeScreen>
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.15),
+        color: color.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(10),
         border: Border.all(
-          color: color.withOpacity(0.3),
+          color: color.withValues(alpha: 0.3),
         ),
       ),
       child: Text(
@@ -1817,7 +2062,7 @@ class _HomeScreenState extends State<HomeScreen>
           color: AppColors.surface,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
-            color: AppColors.cardGlass.withOpacity(0.2),
+            color: AppColors.cardGlass.withValues(alpha: 0.2),
           ),
         ),
         child: Column(
@@ -1852,14 +2097,14 @@ class _HomeScreenState extends State<HomeScreen>
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: AppColors.card.withOpacity(0.6),
+        color: AppColors.card.withValues(alpha: 0.6),
         borderRadius: BorderRadius.circular(24),
         border: Border.all(
-          color: AppColors.cardGlass.withOpacity(0.2),
+          color: AppColors.cardGlass.withValues(alpha: 0.2),
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.2),
+            color: Colors.black.withValues(alpha: 0.2),
             blurRadius: 20,
             offset: const Offset(0, 10),
           ),
@@ -1886,7 +2131,7 @@ class _HomeScreenState extends State<HomeScreen>
                   borderRadius: BorderRadius.circular(16),
                   boxShadow: [
                     BoxShadow(
-                      color: AppColors.primary.withOpacity(0.3),
+                      color: AppColors.primary.withValues(alpha: 0.3),
                       blurRadius: 12,
                       offset: const Offset(0, 4),
                     ),
@@ -2029,7 +2274,7 @@ class _HomeScreenState extends State<HomeScreen>
               borderRadius: BorderRadius.circular(16),
               boxShadow: [
                 BoxShadow(
-                  color: AppColors.primary.withOpacity(0.4),
+                  color: AppColors.primary.withValues(alpha: 0.4),
                   blurRadius: 20,
                   offset: const Offset(0, 8),
                 ),
@@ -2081,10 +2326,10 @@ class _HomeScreenState extends State<HomeScreen>
                 Container(
                   padding: const EdgeInsets.all(20),
                   decoration: BoxDecoration(
-                    color: AppColors.surface.withOpacity(0.3),
+                    color: AppColors.surface.withValues(alpha: 0.3),
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
-                      color: AppColors.primary.withOpacity(0.2),
+                      color: AppColors.primary.withValues(alpha: 0.2),
                     ),
                   ),
                   child: Center(
@@ -2132,10 +2377,10 @@ class _HomeScreenState extends State<HomeScreen>
         Container(
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
-            color: AppColors.surface.withOpacity(0.5),
+            color: AppColors.surface.withValues(alpha: 0.5),
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: color.withOpacity(0.3),
+              color: color.withValues(alpha: 0.3),
               width: 1.5,
             ),
           ),
@@ -2230,13 +2475,13 @@ class _HomeScreenState extends State<HomeScreen>
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
                 color: moistureLevel < 40
-                    ? AppColors.red.withOpacity(0.1)
-                    : AppColors.primary.withOpacity(0.1),
+                    ? AppColors.red.withValues(alpha: 0.1)
+                    : AppColors.primary.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(
                   color: moistureLevel < 40
-                      ? AppColors.red.withOpacity(0.3)
-                      : AppColors.primary.withOpacity(0.3),
+                      ? AppColors.red.withValues(alpha: 0.3)
+                      : AppColors.primary.withValues(alpha: 0.3),
                 ),
               ),
               child: Text(
@@ -2296,9 +2541,9 @@ class _HomeScreenState extends State<HomeScreen>
   Widget _buildWaterPage() {
     // Calculate totals
     final int weeklyTotal =
-        _dailyHistory.fold(0, (sum, day) => sum + (day['actual'] as int));
+        _dailyHistory.fold(0, (total, day) => total + (day['actual'] as int));
     final int aiSaved =
-        -_dailyHistory.fold(0, (sum, day) => sum + (day['diff'] as int));
+        -_dailyHistory.fold(0, (total, day) => total + (day['diff'] as int));
     final double efficiency = ((aiSaved / weeklyTotal) * 100);
 
     return SingleChildScrollView(
@@ -2417,14 +2662,12 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                 ),
                 const SizedBox(height: 20),
-                ..._dailyHistory
-                    .map((day) => _buildHistoryItem(
-                          date: day['date'] as String,
-                          liters: day['actual'] as int,
-                          diff: day['diff'] as int,
-                          maxLiters: 80,
-                        ))
-                    ,
+                ..._dailyHistory.map((day) => _buildHistoryItem(
+                      date: day['date'] as String,
+                      liters: day['actual'] as int,
+                      diff: day['diff'] as int,
+                      maxLiters: 80,
+                    )),
               ],
             ),
           ),
@@ -2443,10 +2686,10 @@ class _HomeScreenState extends State<HomeScreen>
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: AppColors.surface.withOpacity(0.5),
+        color: AppColors.surface.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
-          color: color.withOpacity(0.3),
+          color: color.withValues(alpha: 0.3),
           width: 1,
         ),
       ),
@@ -2528,7 +2771,7 @@ class _HomeScreenState extends State<HomeScreen>
               end: Alignment.bottomCenter,
               colors: [
                 AppColors.primary,
-                AppColors.primary.withOpacity(0.7),
+                AppColors.primary.withValues(alpha: 0.7),
               ],
             ),
             borderRadius: BorderRadius.circular(6),
@@ -2545,7 +2788,7 @@ class _HomeScreenState extends State<HomeScreen>
               end: Alignment.bottomCenter,
               colors: [
                 AppColors.blue,
-                AppColors.blue.withOpacity(0.7),
+                AppColors.blue.withValues(alpha: 0.7),
               ],
             ),
             borderRadius: BorderRadius.circular(6),
@@ -2590,7 +2833,7 @@ class _HomeScreenState extends State<HomeScreen>
                 Container(
                   height: 8,
                   decoration: BoxDecoration(
-                    color: AppColors.surface.withOpacity(0.3),
+                    color: AppColors.surface.withValues(alpha: 0.3),
                     borderRadius: BorderRadius.circular(4),
                   ),
                 ),
@@ -2603,7 +2846,7 @@ class _HomeScreenState extends State<HomeScreen>
                       gradient: LinearGradient(
                         colors: [
                           AppColors.primary,
-                          AppColors.primary.withOpacity(0.8),
+                          AppColors.primary.withValues(alpha: 0.8),
                         ],
                       ),
                       borderRadius: BorderRadius.circular(4),
@@ -2683,69 +2926,177 @@ class _HomeScreenState extends State<HomeScreen>
 
           // Profile Section
           _buildGlassCard(
-            child: Row(
+            child: Column(
               children: [
-                Container(
-                  width: 60,
-                  height: 60,
-                  decoration: BoxDecoration(
-                    gradient: AppColors.gradient1,
-                    shape: BoxShape.circle,
-                    boxShadow: [
-                      BoxShadow(
-                        color: AppColors.primary.withOpacity(0.3),
-                        blurRadius: 12,
-                        offset: const Offset(0, 4),
+                Row(
+                  children: [
+                    Container(
+                      width: 60,
+                      height: 60,
+                      decoration: BoxDecoration(
+                        gradient: AppColors.gradient1,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppColors.primary.withValues(alpha: 0.3),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
-                  child: const Center(
-                    child: Text('👨‍🌾', style: TextStyle(fontSize: 30)),
-                  ),
+                      child: const Center(
+                        child: Text('👨‍🌾', style: TextStyle(fontSize: 30)),
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _currentFarmerName,
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w800,
+                              color: AppColors.text,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            '📍 $_currentFarmName',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: AppColors.textMuted,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: AppColors.primary.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: AppColors.primary.withValues(alpha: 0.3),
+                              ),
+                            ),
+                            child: Text(
+                              '🌾 $_cropType · $_farmSize acres',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: AppColors.primary,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        t['farmerName']!,
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w800,
-                          color: AppColors.text,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      const Text(
-                        '📍 Punjab, Tamil Nadu',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: AppColors.textMuted,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: AppColors.primary.withOpacity(0.15),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: AppColors.primary.withOpacity(0.3),
+                const SizedBox(height: 16),
+                // Action Buttons Row
+                Row(
+                  children: [
+                    // Edit Profile Button
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => ProfileEditScreen(
+                                currentName: _currentFarmerName,
+                                currentFarm: _currentFarmName,
+                                currentCrop: _cropType,
+                                currentFarmSize: _farmSize,
+                                language: _currentLanguage,
+                                onSave: (name, farm, crop, size) {
+                                  setState(() {
+                                    _currentFarmerName = name;
+                                    _currentFarmName = farm;
+                                    _cropType = crop;
+                                    _farmSize = size;
+                                  });
+                                },
+                              ),
+                            ),
+                          );
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 13),
+                          decoration: BoxDecoration(
+                            gradient: AppColors.gradient1,
+                            borderRadius: BorderRadius.circular(14),
+                            boxShadow: [
+                              BoxShadow(
+                                color: AppColors.primary.withValues(alpha: 0.3),
+                                blurRadius: 10,
+                                offset: const Offset(0, 4),
+                              ),
+                            ],
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Text('✏️', style: TextStyle(fontSize: 16)),
+                              const SizedBox(width: 6),
+                              Text(
+                                _currentLanguage == 'ta' ? 'திருத்து' : 'Edit Profile',
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w800,
+                                  color: AppColors.bg,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                        child: Text(
-                          '🌾 $_cropType · $_farmSize acres',
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: AppColors.primary,
-                            fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    // Manage Zones Button
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => ZonesScreen(
+                                language: _currentLanguage,
+                              ),
+                            ),
+                          );
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 13),
+                          decoration: BoxDecoration(
+                            color: AppColors.blue.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                              color: AppColors.blue.withValues(alpha: 0.4),
+                              width: 1.5,
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Text('🗺️', style: TextStyle(fontSize: 16)),
+                              const SizedBox(width: 6),
+                              Text(
+                                _currentLanguage == 'ta' ? 'பகுதிகள்' : 'Manage Zones',
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w800,
+                                  color: AppColors.blue,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -2900,7 +3251,7 @@ class _HomeScreenState extends State<HomeScreen>
               borderRadius: BorderRadius.circular(16),
               boxShadow: [
                 BoxShadow(
-                  color: AppColors.primary.withOpacity(0.4),
+                  color: AppColors.primary.withValues(alpha: 0.4),
                   blurRadius: 20,
                   offset: const Offset(0, 8),
                 ),
@@ -2987,7 +3338,7 @@ class _HomeScreenState extends State<HomeScreen>
               borderRadius: BorderRadius.circular(16),
               boxShadow: [
                 BoxShadow(
-                  color: AppColors.primary.withOpacity(0.3),
+                  color: AppColors.primary.withValues(alpha: 0.3),
                   blurRadius: 12,
                   offset: const Offset(0, 4),
                 ),
@@ -3148,10 +3499,10 @@ class _HomeScreenState extends State<HomeScreen>
             width: double.infinity,
             height: 56,
             decoration: BoxDecoration(
-              color: AppColors.red.withOpacity(0.1),
+              color: AppColors.red.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(16),
               border: Border.all(
-                color: AppColors.red.withOpacity(0.3),
+                color: AppColors.red.withValues(alpha: 0.3),
                 width: 1.5,
               ),
             ),
@@ -3193,10 +3544,15 @@ class _HomeScreenState extends State<HomeScreen>
                         ),
                         TextButton(
                           onPressed: () async {
+                            try {
+                              await AuthService().signOut();
+                            } catch (_) {}
+
                             // Clear login state
                             final prefs = await SharedPreferences.getInstance();
                             await prefs.setBool('isLoggedIn', false);
                             await prefs.remove('language');
+                            await prefs.remove('activeUserIdentifier');
 
                             if (!mounted) return;
                             if (!context.mounted) return;
@@ -3254,13 +3610,13 @@ class _HomeScreenState extends State<HomeScreen>
       padding: const EdgeInsets.symmetric(vertical: 14),
       decoration: BoxDecoration(
         color: isSelected
-            ? AppColors.primary.withOpacity(0.15)
-            : AppColors.surface.withOpacity(0.3),
+            ? AppColors.primary.withValues(alpha: 0.15)
+            : AppColors.surface.withValues(alpha: 0.3),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: isSelected
               ? AppColors.primary
-              : AppColors.cardGlass.withOpacity(0.2),
+              : AppColors.cardGlass.withValues(alpha: 0.2),
           width: isSelected ? 2 : 1,
         ),
       ),
@@ -3312,7 +3668,7 @@ class _HomeScreenState extends State<HomeScreen>
           value: value,
           onChanged: onChanged,
           activeThumbColor: AppColors.primary,
-          activeTrackColor: AppColors.primary.withOpacity(0.5),
+          activeTrackColor: AppColors.primary.withValues(alpha: 0.5),
         ),
       ],
     );
@@ -3361,9 +3717,9 @@ class _HomeScreenState extends State<HomeScreen>
         SliderTheme(
           data: SliderThemeData(
             activeTrackColor: AppColors.primary,
-            inactiveTrackColor: AppColors.surface.withOpacity(0.5),
+            inactiveTrackColor: AppColors.surface.withValues(alpha: 0.5),
             thumbColor: AppColors.primary,
-            overlayColor: AppColors.primary.withOpacity(0.2),
+            overlayColor: AppColors.primary.withValues(alpha: 0.2),
             trackHeight: 6,
             thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 10),
           ),

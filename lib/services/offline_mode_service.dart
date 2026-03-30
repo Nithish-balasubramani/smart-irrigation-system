@@ -10,13 +10,13 @@ class OfflineModeService {
   OfflineModeService._internal();
 
   // System modes
-  static const String ONLINE = 'ONLINE';
-  static const String WIFI_OFFLINE = 'WIFI_OFFLINE';
-  static const String FB_OFFLINE = 'FB_OFFLINE';
-  static const String SENSOR_FAIL = 'SENSOR_FAIL';
+  static const String online = 'ONLINE';
+  static const String wifiOffline = 'WIFI_OFFLINE';
+  static const String fbOffline = 'FB_OFFLINE';
+  static const String sensorFail = 'SENSOR_FAIL';
 
   // Current system mode
-  String _currentMode = ONLINE;
+  String _currentMode = online;
   String get currentMode => _currentMode;
 
   // Connectivity status
@@ -95,13 +95,13 @@ class OfflineModeService {
     final previousMode = _currentMode;
 
     if (!_isWiFiConnected) {
-      _currentMode = WIFI_OFFLINE;
+      _currentMode = wifiOffline;
     } else if (!_isFirebaseConnected) {
-      _currentMode = FB_OFFLINE;
+      _currentMode = fbOffline;
     } else if (!_isSensorHealthy) {
-      _currentMode = SENSOR_FAIL;
+      _currentMode = sensorFail;
     } else {
-      _currentMode = ONLINE;
+      _currentMode = online;
     }
 
     if (previousMode != _currentMode) {
@@ -129,10 +129,10 @@ class OfflineModeService {
   }
 
   /// Check if system is online
-  bool get isOnline => _currentMode == ONLINE;
+  bool get isOnline => _currentMode == online;
 
   /// Check if system is in any offline mode
-  bool get isOffline => _currentMode != ONLINE;
+  bool get isOffline => _currentMode != online;
 
   /// Dispose resources
   void dispose() {

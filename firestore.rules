@@ -17,6 +17,11 @@ service cloud.firestore {
         allow read, write: if request.auth != null && request.auth.uid == userId;
       }
     }
+
+    // Real-time fake sensor feed for local testing
+    match /irrigation_data/{document=**} {
+      allow read, write: if true;
+    }
     
     // Default: deny all other access
     match /{document=**} {
