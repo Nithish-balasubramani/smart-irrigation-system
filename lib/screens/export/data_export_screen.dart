@@ -1,8 +1,11 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:pdf/widgets.dart' as pw;
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -36,7 +39,7 @@ class _DataExportScreenState extends State<DataExportScreen> {
 
   String _userId = 'default_user';
   bool _isExporting = false;
-  String _exportFormat = 'CSV'; // CSV or JSON
+  String _exportFormat = 'CSV'; // CSV, JSON or PDF
   DateTime _fromDate = DateTime.now().subtract(const Duration(days: 7));
   DateTime _toDate = DateTime.now();
 
@@ -97,31 +100,35 @@ class _DataExportScreenState extends State<DataExportScreen> {
       }
 
       // Build file content
-      String content;
       String fileName;
       String mimeType;
+      Uint8List bytes;
 
       final dateStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
 
       if (_exportFormat == 'CSV') {
-        content = _buildCSV(allData);
         fileName = 'agrismart_export_$dateStr.csv';
         mimeType = 'text/csv';
-      } else {
-        content = _buildJSON(allData);
+        bytes = Uint8List.fromList(utf8.encode(_buildCSV(allData)));
+      } else if (_exportFormat == 'JSON') {
         fileName = 'agrismart_export_$dateStr.json';
         mimeType = 'application/json';
+        bytes = Uint8List.fromList(utf8.encode(_buildJSON(allData)));
+      } else {
+        fileName = 'agrismart_export_$dateStr.pdf';
+        mimeType = 'application/pdf';
+        bytes = await _buildPdf(allData);
       }
 
       // Save to temp directory
       final dir = await getTemporaryDirectory();
       final file = File('${dir.path}/$fileName');
-      await file.writeAsString(content);
+      await file.writeAsBytes(bytes, flush: true);
 
       if (!mounted) return;
 
       // Share the file
-      await SharePlus.shareXFiles(
+      await Share.shareXFiles(
         [XFile(file.path, mimeType: mimeType)],
         subject: 'AgriSmart Data Export - $dateStr',
         text: isTamil
@@ -365,6 +372,69 @@ class _DataExportScreenState extends State<DataExportScreen> {
     return buf.toString();
   }
 
+  Future<Uint8List> _buildPdf(Map<String, dynamic> data) async {
+    final pdf = pw.Document();
+
+    final dateRange =
+        '${DateFormat('yyyy-MM-dd').format(_fromDate)} to ${DateFormat('yyyy-MM-dd').format(_toDate)}';
+
+    pdf.addPage(
+      pw.MultiPage(
+        build: (context) => [
+          pw.Text('AgriSmart Data Export',
+              style:
+                  pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
+          pw.SizedBox(height: 8),
+          pw.Text('Generated: ${DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now())}'),
+          pw.Text('Date Range: $dateRange'),
+          pw.Text('User: $_userId'),
+          pw.SizedBox(height: 16),
+          if (data.containsKey('sensor_data')) ...[
+            pw.Text('Sensor Readings',
+                style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+            pw.SizedBox(height: 6),
+            ..._rowsToPdfLines(data['sensor_data'] as List<Map<String, dynamic>>, 30),
+            pw.SizedBox(height: 12),
+          ],
+          if (data.containsKey('irrigation_history')) ...[
+            pw.Text('Irrigation History',
+                style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+            pw.SizedBox(height: 6),
+            ..._rowsToPdfLines(
+                data['irrigation_history'] as List<Map<String, dynamic>>, 20),
+            pw.SizedBox(height: 12),
+          ],
+          if (data.containsKey('water_usage')) ...[
+            pw.Text('Water Usage Summary',
+                style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+            pw.SizedBox(height: 6),
+            ..._rowsToPdfLines(data['water_usage'] as List<Map<String, dynamic>>, 20),
+            pw.SizedBox(height: 12),
+          ],
+          if (data.containsKey('schedules')) ...[
+            pw.Text('Schedules',
+                style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+            pw.SizedBox(height: 6),
+            ..._rowsToPdfLines(data['schedules'] as List<Map<String, dynamic>>, 20),
+          ],
+        ],
+      ),
+    );
+
+    return pdf.save();
+  }
+
+  List<pw.Widget> _rowsToPdfLines(
+      List<Map<String, dynamic>> rows, int maxRows) {
+    return rows.take(maxRows).map((row) {
+      final text = row.entries.map((e) => '${e.key}: ${e.value}').join(' | ');
+      return pw.Padding(
+        padding: const pw.EdgeInsets.only(bottom: 4),
+        child: pw.Text(text, style: const pw.TextStyle(fontSize: 9)),
+      );
+    }).toList();
+  }
+
   // ─── BUILD ────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
@@ -457,8 +527,8 @@ class _DataExportScreenState extends State<DataExportScreen> {
                 const SizedBox(height: 4),
                 Text(
                   isTamil
-                      ? 'CSV அல்லது JSON ஆக பதிவிறக்கம் செய்'
-                      : 'Download as CSV or JSON and share',
+                    ? 'CSV / JSON / PDF ஆக பதிவிறக்கம் செய்'
+                    : 'Download as CSV, JSON, or PDF and share',
                   style:
                       const TextStyle(fontSize: 12, color: _textMuted),
                 ),
@@ -723,6 +793,14 @@ class _DataExportScreenState extends State<DataExportScreen> {
               'JSON',
               '⚙️',
               isTamil ? 'டெவலப்பர் வடிவம்' : 'Developer format',
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: _buildFormatOption(
+              'PDF',
+              '📄',
+              isTamil ? 'பகிர்வு அறிக்கை' : 'Shareable report',
             ),
           ),
         ],

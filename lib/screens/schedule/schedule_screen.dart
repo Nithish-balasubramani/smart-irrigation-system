@@ -72,8 +72,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   static const Color _textMuted = Color(0xFF567060);
   static const Color _red = Color(0xFFFF6B6B);
   static const Color _blue = Color(0xFF40C4FF);
-  static const Color _yellow = Color(0xFFFFD54F);
-  static const Color _cardGlass = Color(0x40FFFFFF);
 
   final List<String> _dayLabels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
   final List<String> _dayFullNames = [
@@ -165,7 +163,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   }
 
   String _formatTime(TimeOfDay t) {
-    final h = t.hour.toString().padLeft(2, '0');
     final m = t.minute.toString().padLeft(2, '0');
     final period = t.hour < 12 ? 'AM' : 'PM';
     final h12 = t.hour == 0
@@ -634,7 +631,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                     setState(() => schedule.isEnabled = v);
                     _saveSchedules();
                   },
-                  activeColor: _primary,
+                  activeThumbColor: _primary,
                   activeTrackColor: _primary.withValues(alpha: 0.4),
                 ),
               ],

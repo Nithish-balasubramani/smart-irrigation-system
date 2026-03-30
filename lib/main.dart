@@ -17,6 +17,7 @@ import 'services/notification_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await AppSettingsController.instance.load();
 
   // Initialize Firebase
   await Firebase.initializeApp(
@@ -127,6 +128,7 @@ class AppStrings {
       'waterUsage': 'Water Usage',
       'cropManager': 'Crop Manager',
       'language': 'Language',
+      'darkMode': 'Dark Mode',
       'systemConfig': 'System Config',
       'autoIrrigation': 'Auto Irrigation',
       'autoIrrigationDesc': 'AI controls pumps automatically',
@@ -209,6 +211,7 @@ class AppStrings {
       'waterUsage': 'நீர் பயன்பாடு',
       'cropManager': 'பயிர் மேலாளர்',
       'language': 'மொழி',
+      'darkMode': 'இரவு தோற்றம்',
       'systemConfig': 'முறைமை அமைப்பு',
       'autoIrrigation': 'தானியங்கி நீர்ப்பாய்ச்சு',
       'autoIrrigationDesc': 'AI பம்புகளை தானாகவே கட்டுப்படுத்துகிறது',
@@ -261,6 +264,55 @@ class AppStrings {
   };
 }
 
+class AppSettingsController extends ChangeNotifier {
+  AppSettingsController._();
+
+  static final AppSettingsController instance = AppSettingsController._();
+
+  String _language = 'en';
+  bool _isDarkMode = true;
+
+  String get language => _language;
+  bool get isDarkMode => _isDarkMode;
+
+  Future<void> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    _language = prefs.getString('language') ?? 'en';
+    _isDarkMode = prefs.getBool('darkMode') ?? true;
+    notifyListeners();
+  }
+
+  Future<void> setLanguage(String language) async {
+    if (_language == language) return;
+    _language = language;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('language', language);
+    notifyListeners();
+  }
+
+  Future<void> setDarkMode(bool value) async {
+    if (_isDarkMode == value) return;
+    _isDarkMode = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('darkMode', value);
+    notifyListeners();
+  }
+}
+
+class AppSettingsScope extends InheritedNotifier<AppSettingsController> {
+  const AppSettingsScope({
+    super.key,
+    required AppSettingsController notifier,
+    required super.child,
+  }) : super(notifier: notifier);
+
+  static AppSettingsController of(BuildContext context) {
+    final scope =
+        context.dependOnInheritedWidgetOfExactType<AppSettingsScope>();
+    return scope?.notifier ?? AppSettingsController.instance;
+  }
+}
+
 // ═══════════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════════
@@ -269,23 +321,43 @@ class AgriSmartApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'AgriSmart',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: AppColors.bg,
-        fontFamily: 'System',
-        colorScheme: const ColorScheme.dark(
-          primary: AppColors.primary,
-          secondary: AppColors.accent,
-          surface: AppColors.surface,
-        ),
+    return AppSettingsScope(
+      notifier: AppSettingsController.instance,
+      child: AnimatedBuilder(
+        animation: AppSettingsController.instance,
+        builder: (context, _) {
+          final settings = AppSettingsController.instance;
+          return MaterialApp(
+            title: 'AgriSmart',
+            debugShowCheckedModeBanner: false,
+            themeMode: settings.isDarkMode ? ThemeMode.dark : ThemeMode.light,
+            theme: ThemeData(
+              brightness: Brightness.light,
+              scaffoldBackgroundColor: const Color(0xFFF4FBF7),
+              fontFamily: 'System',
+              colorScheme: const ColorScheme.light(
+                primary: AppColors.primaryDark,
+                secondary: AppColors.accent,
+                surface: Colors.white,
+              ),
+            ),
+            darkTheme: ThemeData(
+              brightness: Brightness.dark,
+              scaffoldBackgroundColor: AppColors.bg,
+              fontFamily: 'System',
+              colorScheme: const ColorScheme.dark(
+                primary: AppColors.primary,
+                secondary: AppColors.accent,
+                surface: AppColors.surface,
+              ),
+            ),
+            routes: {
+              '/irrigation': (context) => const IrrigationScreen(),
+            },
+            home: const SplashScreen(),
+          );
+        },
       ),
-      routes: {
-        '/irrigation': (context) => const IrrigationScreen(),
-      },
-      home: const SplashScreen(),
     );
   }
 }
@@ -456,6 +528,7 @@ class _LoginScreenState extends State<LoginScreen>
   @override
   void initState() {
     super.initState();
+    _language = AppSettingsController.instance.language;
     _animController = AnimationController(
       duration: const Duration(milliseconds: 1200),
       vsync: this,
@@ -858,7 +931,10 @@ class _LoginScreenState extends State<LoginScreen>
   Widget _buildLangButton(String code, String label) {
     final isSelected = _language == code;
     return GestureDetector(
-      onTap: () => setState(() => _language = code),
+      onTap: () {
+        setState(() => _language = code);
+        AppSettingsController.instance.setLanguage(code);
+      },
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
         decoration: BoxDecoration(
@@ -1012,7 +1088,9 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   void initState() {
     super.initState();
-    _currentLanguage = widget.language;
+    _currentLanguage = AppSettingsController.instance.language.isNotEmpty
+        ? AppSettingsController.instance.language
+        : widget.language;
     _activeUserIdentifier = widget.userIdentifier.trim();
     _pulseController = AnimationController(
       duration: const Duration(milliseconds: 2000),
@@ -3131,9 +3209,8 @@ class _HomeScreenState extends State<HomeScreen>
                           setState(() {
                             _currentLanguage = 'en';
                           });
-                          // Save language preference
-                          final prefs = await SharedPreferences.getInstance();
-                          await prefs.setString('language', 'en');
+                              await AppSettingsController.instance
+                                  .setLanguage('en');
                         },
                         child: _buildLanguageButton('en', 'English'),
                       ),
@@ -3145,9 +3222,8 @@ class _HomeScreenState extends State<HomeScreen>
                           setState(() {
                             _currentLanguage = 'ta';
                           });
-                          // Save language preference
-                          final prefs = await SharedPreferences.getInstance();
-                          await prefs.setString('language', 'ta');
+                          await AppSettingsController.instance
+                              .setLanguage('ta');
                         },
                         child: _buildLanguageButton('ta', 'தமிழ்'),
                       ),
@@ -3179,6 +3255,18 @@ class _HomeScreenState extends State<HomeScreen>
                   ],
                 ),
                 const SizedBox(height: 20),
+                _buildToggleItem(
+                  t['darkMode'] ?? 'Dark Mode',
+                  _currentLanguage == 'ta'
+                      ? 'முழு பயன்பாட்டிற்கும் இரவு தோற்றம்'
+                      : 'Use dark theme across the app',
+                  AppSettingsController.instance.isDarkMode,
+                  (value) {
+                    AppSettingsController.instance.setDarkMode(value);
+                    setState(() {});
+                  },
+                ),
+                const SizedBox(height: 16),
                 _buildToggleItem(
                   t['autoIrrigation']!,
                   t['autoIrrigationDesc']!,
